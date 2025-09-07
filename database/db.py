@@ -1,146 +1,127 @@
+import asyncio
+import random
+import string
+from datetime import datetime
 
-from sqlalchemy import create_engine, select, insert, update
-from sqlalchemy.orm import Session
-from database.schema import metadata, users, referrals, transactions, withdrawals
-import string, random
-import datetime
-from config import DATABASE_URL, MIN_WITHDRAWAL_AMOUNT
+from motor.motor_asyncio import AsyncIOMotorClient
+from config import MONGO_URI
 
-engine = create_engine(DATABASE_URL, echo=False, future=True)
-metadata.create_all(engine)
+client = AsyncIOMotorClient(MONGO_URI)
+db = client.referral_bot  # Database name
+
+referral_bonus = 50  # points
 
 def generate_referral_code(length=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-def get_or_create_user(telegram_id, username):
-    with Session(engine) as session:
-        stmt = select(users).where(users.c.telegram_id == telegram_id)
-        user = session.execute(stmt).first()
-        if user:
-            return dict(user._mapping)
-        # create new user
+async def get_or_create_user(telegram_id, username):
+    user = await db.users.find_one({"telegram_id": telegram_id})
+    if user:
+        return user
+    referral_code = generate_referral_code()
+    # Ensure unique referral code
+    while await db.users.find_one({"referral_code": referral_code}):
         referral_code = generate_referral_code()
-        # ensure unique code
-        while session.execute(select(users).where(users.c.referral_code == referral_code)).first():
-            referral_code = generate_referral_code()
-        new_user = {
-            "telegram_id": telegram_id,
-            "username": username,
-            "referral_code": referral_code,
-            "registered_at": datetime.datetime.utcnow()
+    new_user = {
+        "telegram_id": telegram_id,
+        "username": username,
+        "referral_code": referral_code,
+        "registered_at": datetime.utcnow()
+    }
+    await db.users.insert_one(new_user)
+    return new_user
+
+async def add_referral(referee_telegram_id, referrer_code):
+    referee = await db.users.find_one({"telegram_id": referee_telegram_id})
+    if not referee:
+        return "You must start the bot first using /start."
+
+    if referee.get("referral_code") == referrer_code:
+        return "You cannot refer yourself."
+
+    referrer = await db.users.find_one({"referral_code": referrer_code})
+    if not referrer:
+        return "Invalid referral code."
+
+    existing_referral = await db.referrals.find_one({"referee_id": referee['_id']})
+    if existing_referral:
+        return "You have already used a referral code."
+
+    await db.referrals.insert_one({
+        "referrer_id": referrer['_id'],
+        "referee_id": referee['_id'],
+        "created_at": datetime.utcnow()
+    })
+
+    # Credit points
+    await db.transactions.insert_many([
+        {
+            "user_id": referrer['_id'],
+            "amount": referral_bonus,
+            "type": "credit",
+            "description": f"Referral bonus for referring user {referee.get('username')}",
+            "created_at": datetime.utcnow()
+        },
+        {
+            "user_id": referee['_id'],
+            "amount": referral_bonus,
+            "type": "credit",
+            "description": f"Referral bonus for being referred by {referrer.get('username')}",
+            "created_at": datetime.utcnow()
         }
-        session.execute(insert(users).values(**new_user))
-        session.commit()
-        return new_user
+    ])
 
-def add_referral(referee_telegram_id, referrer_code):
-    with Session(engine) as session:
-        # Get referee user record
-        referee_stmt = select(users).where(users.c.telegram_id == referee_telegram_id)
-        referee = session.execute(referee_stmt).first()
-        if not referee:
-            return "You must start the bot first using /start."
+    return "Referral successfully registered! Both you and your referrer have been credited."
 
-        referee = dict(referee._mapping)
-        if referee['referral_code'] == referrer_code:
-            return "You cannot refer yourself."
+async def get_balance(telegram_id):
+    user = await db.users.find_one({"telegram_id": telegram_id})
+    if not user:
+        return 0
+    pipeline = [
+        {"$match": {"user_id": user['_id']}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]
+    result = await db.transactions.aggregate(pipeline).to_list(length=1)
+    return result[0]['total'] if result else 0
 
-        # Find referrer by referral code
-        referrer_stmt = select(users).where(users.c.referral_code == referrer_code)
-        referrer = session.execute(referrer_stmt).first()
-        if not referrer:
-            return "Invalid referral code."
+async def request_withdrawal(telegram_id, method, address, min_withdrawal_amount):
+    user = await db.users.find_one({"telegram_id": telegram_id})
+    if not user:
+        return "User not found."
 
-        referrer = dict(referrer._mapping)
+    balance = await get_balance(telegram_id)
+    if balance < min_withdrawal_amount:
+        return f"Minimum withdrawal amount is {min_withdrawal_amount} points. Your balance is {balance}."
 
-        # Check if referral already exists
-        exists_stmt = select(referrals).where(
-            referrals.c.referee_id == referee['id']
-        )
-        if session.execute(exists_stmt).first():
-            return "You have already used a referral code."
+    # Debit transactions
+    await db.transactions.insert_one({
+        "user_id": user['_id'],
+        "amount": -balance,
+        "type": "debit",
+        "description": f"Withdrawal request via {method} to {address}",
+        "created_at": datetime.utcnow()
+    })
 
-        # Insert referral entry
-        session.execute(insert(referrals).values(
-            referrer_id=referrer['id'],
-            referee_id=referee['id'],
-            created_at=datetime.datetime.utcnow()
-        ))
-        # credit points to both users
-        referral_bonus = 50  # points
-        session.execute(insert(transactions).values(
-            user_id=referrer['id'],
-            amount=referral_bonus,
-            type='credit',
-            description=f"Referral bonus for referring user {referee['username']}",
-            created_at=datetime.datetime.utcnow()
-        ))
-        session.execute(insert(transactions).values(
-            user_id=referee['id'],
-            amount=referral_bonus,
-            type='credit',
-            description=f"Referral bonus for being referred by {referrer['username']}",
-            created_at=datetime.datetime.utcnow()
-        ))
-        session.commit()
-        return "Referral successfully registered! Both you and your referrer have been credited."
+    await db.withdrawals.insert_one({
+        "user_id": user['_id'],
+        "amount": balance,
+        "method": method,
+        "address": address,
+        "status": "pending",
+        "requested_at": datetime.utcnow()
+    })
 
-def get_balance(telegram_id):
-    with Session(engine) as session:
-        user_stmt = select(users).where(users.c.telegram_id == telegram_id)
-        user = session.execute(user_stmt).first()
-        if not user:
-            return 0
-        user = dict(user._mapping)
-        sum_stmt = select(transactions.c.amount).where(transactions.c.user_id == user['id'])
-        amounts = session.execute(sum_stmt).scalars().all()
-        return sum(amounts) if amounts else 0
+    return f"Withdrawal request of {balance} points received. Processing soon."
 
-def request_withdrawal(telegram_id, method, address):
-    with Session(engine) as session:
-        user_stmt = select(users).where(users.c.telegram_id == telegram_id)
-        user = session.execute(user_stmt).first()
-        if not user:
-            return "User not found."
+async def is_admin(telegram_id, admin_ids):
+    return telegram_id in admin_ids
 
-        user = dict(user._mapping)
-        balance = get_balance(telegram_id)
-        if balance < MIN_WITHDRAWAL_AMOUNT:
-            return f"Minimum withdrawal amount is {MIN_WITHDRAWAL_AMOUNT} points. Your balance is {balance}."
+async def get_admin_stats():
+    total_users = await db.users.count_documents({})
+    total_referrals = await db.referrals.count_documents({})
+    total_withdrawals = await db.withdrawals.count_documents({})
 
-        # Debit balance by creating a 'debit' transaction
-        session.execute(insert(transactions).values(
-            user_id=user['id'],
-            amount=-balance,
-            type='debit',
-            description=f"Withdrawal request via {method} to {address}",
-            created_at=datetime.datetime.utcnow()
-        ))
-
-        # Create withdrawal request
-        session.execute(insert(withdrawals).values(
-            user_id=user['id'],
-            amount=balance,
-            method=method,
-            address=address,
-            status='pending',
-            requested_at=datetime.datetime.utcnow()
-        ))
-        session.commit()
-        return f"Withdrawal request of {balance} points received. Processing soon."
-
-def is_admin(telegram_id):
-    from config import ADMIN_IDS
-    return telegram_id in ADMIN_IDS
-
-def get_admin_stats():
-    with Session(engine) as session:
-        total_users = session.execute(select(users.c.id)).all()
-        total_referrals = session.execute(select(referrals.c.id)).all()
-        total_withdrawals = session.execute(select(withdrawals.c.id)).all()
-        return (
-            f"System Stats:\n"
-            f"Total Users: {len(total_users)}\n"
-            f"Total Referrals: {len(total_referrals)}\n"
-            f"Total Withdrawals: {len(total_withdrawals)}"
-        )
+    return (f"System Stats:\n"
+            f"Total Users: {total_users}\n"
+            f"Total Referrals: {total_referrals}\n"
+            f"Total Withdrawals: {total_withdrawals}")
