@@ -27,7 +27,7 @@ menu_buttons = [
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
-    # Force subscribe check here if needed (previous code)...
+    # Optionally, add force-subscribe check here
 
     reply_markup = ReplyKeyboardMarkup(menu_buttons, resize_keyboard=True)
     welcome_text = (
@@ -38,6 +38,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text, reply_markup=reply_markup)
 
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    balance = await get_balance(user.id)
+    await update.message.reply_text(f"Your current balance is: ₹{balance}")
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -59,7 +63,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Please select an option from the menu.")
 
-
 async def refer_and_earn(update, context):
     user = update.effective_user
     bot_username = (await context.bot.get_me()).username
@@ -70,7 +73,6 @@ async def refer_and_earn(update, context):
         "Start sharing now to earn instant UPI cashouts! 💸"
     )
     await update.message.reply_text(text)
-
 
 async def info(update, context):
     text = (
@@ -83,7 +85,6 @@ async def info(update, context):
     )
     await update.message.reply_markdown_v2(text)
 
-
 async def wallet(update, context):
     user = update.effective_user
     balance = await get_balance(user.id)
@@ -91,7 +92,6 @@ async def wallet(update, context):
     referral_code = user_record["referral_code"]
     upi_id = await get_user_upi(user.id) or "Not set"
     referred_count = await get_referred_count(user.id)
-
     text = (
         f"👛 *Your Wallet*\n\n"
         f"Balance: ₹{balance}\n"
@@ -101,29 +101,24 @@ async def wallet(update, context):
     )
     await update.message.reply_markdown_v2(text)
 
-
 async def set_upi_start(update, context):
     await update.message.reply_text("Please send your UPI ID (e.g. 7797382937@paytm):")
     return SET_UPI
 
-
 async def set_upi_received(update, context):
     upi_id = update.message.text.strip()
     user_id = update.effective_user.id
-    # You may add UPI validation here
     await save_user_upi(user_id, upi_id)
     keyboard = [[InlineKeyboardButton("Change UPI ID", callback_data="change_upi")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(f"Your UPI ID has been set to: {upi_id}", reply_markup=reply_markup)
     return ConversationHandler.END
 
-
 async def change_upi_callback(update, context):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Please send your new UPI ID:")
     return SET_UPI
-
 
 async def withdraw_start(update, context):
     user = update.effective_user
@@ -133,7 +128,6 @@ async def withdraw_start(update, context):
         return ConversationHandler.END
     await update.message.reply_text(f"Your balance: ₹{balance}\nHow much would you like to withdraw?")
     return WITHDRAW_AMOUNT
-
 
 async def withdraw_amount_received(update, context):
     user = update.effective_user
@@ -146,8 +140,7 @@ async def withdraw_amount_received(update, context):
     if amount > balance:
         await update.message.reply_text(f"You cannot withdraw more than your balance ₹{balance}. Enter a valid amount.")
         return WITHDRAW_AMOUNT
-    # Here, you would call your withdrawal request logic (ask UPI if not set)
-    method = "UPI"  # Example fixed method for now
+    method = "UPI"
     upi_id = await get_user_upi(user.id)
     if not upi_id:
         await update.message.reply_text("You need to set your UPI ID first via 'Set UPI' menu.")
@@ -156,35 +149,10 @@ async def withdraw_amount_received(update, context):
     await update.message.reply_text(result)
     return ConversationHandler.END
 
-
 async def check_in(update, context):
     user_id = update.effective_user.id
-    result = await process_daily_checkin(user_id)  # Implement this with your logic
+    result = await process_daily_checkin(user_id)
     if result == "success":
         await update.message.reply_text("✅ Daily check-in successful! You earned ₹0.50.")
     else:
         await update.message.reply_text(f"⏳ You can check in again after {result} hours.")
-
-
-# Conversation handler states and handlers to add in main.py
-from telegram.ext import ConversationHandler
-
-conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex("^(💳 Set UPI)$"), set_upi_start)],
-    states={
-        SET_UPI: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_upi_received)],
-    },
-    fallbacks=[],
-)
-
-withdraw_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex("^(💸 Withdraw)$"), withdraw_start)],
-    states={
-        WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount_received)],
-    },
-    fallbacks=[],
-)
-
-# Also add a callback query handler for changing UPI ID
-change_upi_callback_handler = CallbackQueryHandler(change_upi_callback, pattern="change_upi")
-
