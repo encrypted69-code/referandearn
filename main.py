@@ -1,6 +1,7 @@
 from telegram.ext import ApplicationBuilder, CommandHandler
 from bot.handlers import start, balance, withdraw, enter_referral, admin_stats
 from config import BOT_TOKEN  # Import your actual bot token here
+from telegram.ext import CallbackQueryHandler
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()  # Use the token from config
@@ -9,6 +10,7 @@ def main():
     app.add_handler(CommandHandler("withdraw", withdraw))
     app.add_handler(CommandHandler("referral", enter_referral))
     app.add_handler(CommandHandler("adminstats", admin_stats))
+    app.add_handler(CallbackQueryHandler(check_sub_callback, pattern="check_sub"))
     print("Bot is running...")
     app.run_polling()
 
