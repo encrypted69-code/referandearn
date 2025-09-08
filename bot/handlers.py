@@ -1,82 +1,190 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+from telegram import (
+    InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+)
+from telegram.ext import (
+    ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, filters
+)
 from config import FSUB_IDS, ADMIN_IDS, MIN_WITHDRAWAL_AMOUNT
 from database.db import (
     get_or_create_user, get_balance, add_referral,
-    request_withdrawal, is_admin, get_admin_stats
+    request_withdrawal, is_admin, get_admin_stats,
+    save_user_upi, get_user_upi,
+    get_referred_count,
+    process_daily_checkin
 )
 
-FSUB_CHANNEL_ID = FSUB_IDS[0]  # e.g. -1002661417456
+FSUB_CHANNEL_ID = FSUB_IDS[0]  # -1002661417456
 FSUB_CHANNEL_LINK = "https://t.me/+qXNXNu_LytJiMzU0"
+
+SET_UPI, WITHDRAW_AMOUNT = range(2)
+
+menu_buttons = [
+    ["📢 Refer and Earn", "ℹ️ Info"],
+    ["👛 Wallet", "💳 Set UPI"],
+    ["💸 Withdraw", "✅ Check In"]
+]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_id = update.effective_chat.id
 
-    # Send force-subscription message with buttons
-    keyboard = [
-        [InlineKeyboardButton("Join Now", url=FSUB_CHANNEL_LINK)],
-        [InlineKeyboardButton("Joined", callback_data="check_sub")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Force subscribe check here if needed (previous code)...
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="To access this bot, please join our channel first.",
-        reply_markup=reply_markup
+    reply_markup = ReplyKeyboardMarkup(menu_buttons, resize_keyboard=True)
+    welcome_text = (
+        f"👋 Hey {user.first_name}!\n\n"
+        "Welcome to Refer & Earn Bot 💰\n\n"
+        "Earn ₹2 per referral! Share your unique link and start earning instant UPI cashout! 🚀\n"
+        "Please use the menu below to navigate."
     )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text, reply_markup=reply_markup)
 
-async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
 
-    try:
-        member = await context.bot.get_chat_member(FSUB_CHANNEL_ID, user_id)
-        status = member.status
-        if status in ["member", "creator", "administrator"]:
-            await query.answer("Welcome! You have access to the bot now.")
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "📢 Refer and Earn":
+        await refer_and_earn(update, context)
+    elif text == "ℹ️ Info":
+        await info(update, context)
+    elif text == "👛 Wallet":
+        await wallet(update, context)
+    elif text == "💳 Set UPI":
+        await set_upi_start(update, context)
+        return SET_UPI
+    elif text == "💸 Withdraw":
+        await withdraw_start(update, context)
+        return WITHDRAW_AMOUNT
+    elif text == "✅ Check In":
+        await check_in(update, context)
+    else:
+        await update.message.reply_text("Please select an option from the menu.")
 
-            # Proceed with normal start flow, e.g. create/get user data
-            user_record = await get_or_create_user(user_id, query.from_user.username)
-            text = (
-                f"Thanks for joining! You now have access to the bot.\n"
-                f"Your referral code is: {user_record['referral_code']}\n"
-                "Invite others using your code!"
-            )
-            await query.edit_message_text(text)
-        else:
-            await query.answer("Please join the channel first to access the bot.", show_alert=True)
-    except Exception:
-        await query.answer("Please join the channel first to access the bot.", show_alert=True)
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def refer_and_earn(update, context):
+    user = update.effective_user
+    bot_username = (await context.bot.get_me()).username
+    referral_link = f"https://t.me/{bot_username}?start={user.id}"
+    text = (
+        f"📢 Share your referral link and earn ₹2 for every friend who joins and uses the bot!\n\n"
+        f"Your referral link:\n{referral_link}\n\n"
+        "Start sharing now to earn instant UPI cashouts! 💸"
+    )
+    await update.message.reply_text(text)
+
+
+async def info(update, context):
+    text = (
+        "ℹ️ *Refer & Earn Bot Info*\n\n"
+        "🔹 Earn ₹2 per referral\n"
+        "🔹 Instant UPI cashouts available 💳\n"
+        "🔹 Daily check-in bonus of ₹0.50\n"
+        "🔹 No delays, instant credit on referrals\n\n"
+        "Share this bot and start earning money today! 🚀"
+    )
+    await update.message.reply_markdown_v2(text)
+
+
+async def wallet(update, context):
     user = update.effective_user
     balance = await get_balance(user.id)
-    await update.message.reply_text(f"Your current balance is: {balance} points.")
+    user_record = await get_or_create_user(user.id, user.username)
+    referral_code = user_record["referral_code"]
+    upi_id = await get_user_upi(user.id) or "Not set"
+    referred_count = await get_referred_count(user.id)
 
-async def enter_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        f"👛 *Your Wallet*\n\n"
+        f"Balance: ₹{balance}\n"
+        f"Referral Code: {referral_code}\n"
+        f"Referred Users: {referred_count}\n"
+        f"UPI ID: {upi_id}"
+    )
+    await update.message.reply_markdown_v2(text)
+
+
+async def set_upi_start(update, context):
+    await update.message.reply_text("Please send your UPI ID (e.g. 7797382937@paytm):")
+    return SET_UPI
+
+
+async def set_upi_received(update, context):
+    upi_id = update.message.text.strip()
+    user_id = update.effective_user.id
+    # You may add UPI validation here
+    await save_user_upi(user_id, upi_id)
+    keyboard = [[InlineKeyboardButton("Change UPI ID", callback_data="change_upi")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"Your UPI ID has been set to: {upi_id}", reply_markup=reply_markup)
+    return ConversationHandler.END
+
+
+async def change_upi_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Please send your new UPI ID:")
+    return SET_UPI
+
+
+async def withdraw_start(update, context):
     user = update.effective_user
-    if not context.args:
-        await update.message.reply_text("Please provide a referral code: /referral <code>")
-        return
-    referral_code = context.args[0]
-    result = await add_referral(user.id, referral_code)
+    balance = await get_balance(user.id)
+    if balance < MIN_WITHDRAWAL_AMOUNT:
+        await update.message.reply_text(f"Minimum withdrawal amount is ₹{MIN_WITHDRAWAL_AMOUNT}. Your balance: ₹{balance}")
+        return ConversationHandler.END
+    await update.message.reply_text(f"Your balance: ₹{balance}\nHow much would you like to withdraw?")
+    return WITHDRAW_AMOUNT
+
+
+async def withdraw_amount_received(update, context):
+    user = update.effective_user
+    amount_text = update.message.text.strip()
+    if not amount_text.isdigit():
+        await update.message.reply_text("Please enter a valid number amount.")
+        return WITHDRAW_AMOUNT
+    amount = int(amount_text)
+    balance = await get_balance(user.id)
+    if amount > balance:
+        await update.message.reply_text(f"You cannot withdraw more than your balance ₹{balance}. Enter a valid amount.")
+        return WITHDRAW_AMOUNT
+    # Here, you would call your withdrawal request logic (ask UPI if not set)
+    method = "UPI"  # Example fixed method for now
+    upi_id = await get_user_upi(user.id)
+    if not upi_id:
+        await update.message.reply_text("You need to set your UPI ID first via 'Set UPI' menu.")
+        return ConversationHandler.END
+    result = await request_withdrawal(user.id, method, upi_id, MIN_WITHDRAWAL_AMOUNT)
     await update.message.reply_text(result)
+    return ConversationHandler.END
 
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /withdraw <method> <address>")
-        return
-    method = context.args[0]
-    address = " ".join(context.args[1:])
-    result = await request_withdrawal(user.id, method, address, MIN_WITHDRAWAL_AMOUNT)
-    await update.message.reply_text(result)
 
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not await is_admin(user.id, ADMIN_IDS):
-        await update.message.reply_text("You are not authorized to use this command.")
-        return
-    stats_msg = await get_admin_stats()
-    await update.message.reply_text(stats_msg)
+async def check_in(update, context):
+    user_id = update.effective_user.id
+    result = await process_daily_checkin(user_id)  # Implement this with your logic
+    if result == "success":
+        await update.message.reply_text("✅ Daily check-in successful! You earned ₹0.50.")
+    else:
+        await update.message.reply_text(f"⏳ You can check in again after {result} hours.")
+
+
+# Conversation handler states and handlers to add in main.py
+from telegram.ext import ConversationHandler
+
+conv_handler = ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^(💳 Set UPI)$"), set_upi_start)],
+    states={
+        SET_UPI: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_upi_received)],
+    },
+    fallbacks=[],
+)
+
+withdraw_handler = ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex("^(💸 Withdraw)$"), withdraw_start)],
+    states={
+        WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount_received)],
+    },
+    fallbacks=[],
+)
+
+# Also add a callback query handler for changing UPI ID
+change_upi_callback_handler = CallbackQueryHandler(change_upi_callback, pattern="change_upi")
+
