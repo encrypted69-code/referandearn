@@ -38,6 +38,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text, reply_markup=reply_markup)
 
+async def enter_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Please provide a referral code: /referral <code>")
+        return
+    referral_code = context.args[0]
+    result = await add_referral(user.id, referral_code)
+    await update.message.reply_text(result)
+
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     balance = await get_balance(user.id)
