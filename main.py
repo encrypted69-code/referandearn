@@ -1,10 +1,9 @@
-from telegram.ext import ApplicationBuilder, CommandHandler
-from bot.handlers import start, balance, withdraw, enter_referral, admin_stats
-from config import BOT_TOKEN  # Import your actual bot token here
-from telegram.ext import CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
+from bot.handlers import start, balance, withdraw, enter_referral, admin_stats, check_sub_callback
+from config import BOT_TOKEN
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()  # Use the token from config
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("withdraw", withdraw))
